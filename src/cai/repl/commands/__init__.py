@@ -29,6 +29,7 @@ from cai.repl.commands import (  # pylint: disable=import-error,unused-import,li
     merge,  # Add the merge command (alias for /parallel merge)
     model,
     parallel,  # Add the new parallel command
+    pentest,
     platform,
     quickstart,  # Add the quickstart command
     run,  # Add the run command for parallel mode

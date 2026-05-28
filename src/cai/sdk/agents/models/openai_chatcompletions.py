@@ -146,6 +146,15 @@ if os.getenv("CAI_MODEL") == "o3-mini" or os.getenv("CAI_MODEL") == "gemini-1.5-
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
 
+
+def _normalize_litellm_model(model: Any) -> Any:
+    """Add the LiteLLM Ollama provider prefix for local tag-style models."""
+    model_name = str(model)
+    if "/" not in model_name and ":" in model_name:
+        return f"ollama_chat/{model_name}"
+    return model
+
+
 # Global registry to track active model instances
 # This allows us to access instance-based histories for commands like /history
 import weakref
@@ -2076,6 +2085,46 @@ class OpenAIChatCompletionsModel(Model):
                     except Exception:
                         pass
 
+                if is_ollama and ollama_full_content and len(state.function_calls) == 0:
+                    try:
+                        parsed = json.loads(ollama_full_content.strip())
+                        if (
+                            isinstance(parsed, dict)
+                            and set(parsed.keys()) == {"name", "arguments"}
+                            and isinstance(parsed["name"], str)
+                            and isinstance(parsed["arguments"], dict)
+                        ):
+                            arguments_str = json.dumps(parsed["arguments"])
+                            tool_call_id = f"call_{hashlib.md5((parsed['name'] + str(time.time())).encode()).hexdigest()[:8]}"
+                            state.function_calls[0] = ResponseFunctionToolCall(
+                                id=FAKE_RESPONSES_ID,
+                                arguments=arguments_str,
+                                name=parsed["name"],
+                                type="function_call",
+                                call_id=tool_call_id[:40],
+                            )
+                            streamed_tool_calls.append(
+                                {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": tool_call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": parsed["name"],
+                                                "arguments": arguments_str,
+                                            },
+                                        }
+                                    ],
+                                }
+                            )
+                            if state.text_content_index_and_output:
+                                state.text_content_index_and_output[1].text = ""
+                            self.suppress_final_output = True
+                    except Exception:
+                        pass
+
                 function_call_starting_index = 0
                 if state.text_content_index_and_output:
                     function_call_starting_index += 1
@@ -2851,6 +2900,8 @@ class OpenAIChatCompletionsModel(Model):
                 if hasattr(model_settings, "reasoning_effort"):
                     kwargs["reasoning_effort"] = model_settings.reasoning_effort
 
+        kwargs["model"] = _normalize_litellm_model(kwargs["model"])
+
         # Filter out NotGiven values to avoid JSON serialization issues
         filtered_kwargs = {}
         for key, value in kwargs.items():
@@ -3408,7 +3459,7 @@ class OpenAIChatCompletionsModel(Model):
         """
         # Extract only supported parameters for Ollama
         ollama_supported_params = {
-            "model": kwargs.get("model", ""),
+            "model": _normalize_litellm_model(kwargs.get("model", "")),
             "messages": kwargs.get("messages", []),
             "stream": kwargs.get("stream", False),
         }
@@ -3437,6 +3488,9 @@ class OpenAIChatCompletionsModel(Model):
         model_str = str(self.model).lower()
         is_qwen = "qwen" in model_str
         api_base = get_ollama_api_base()
+        litellm_kwargs = {"api_base": api_base}
+        if not str(ollama_kwargs.get("model", "")).startswith("ollama_chat/"):
+            litellm_kwargs["custom_llm_provider"] = "openai"
 
         if stream:
             response = Response(
@@ -3455,15 +3509,14 @@ class OpenAIChatCompletionsModel(Model):
             )
             # Get streaming response
             stream_obj = await litellm.acompletion(
-                **ollama_kwargs, api_base=api_base, custom_llm_provider="openai"
+                **ollama_kwargs, **litellm_kwargs
             )
             return response, stream_obj
         else:
             # Get completion response
             return await litellm.acompletion(
                 **ollama_kwargs,
-                api_base=api_base,
-                custom_llm_provider="openai",
+                **litellm_kwargs,
             )
 
     def _get_model_max_tokens(self, model_name: str) -> int:

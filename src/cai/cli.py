@@ -146,6 +146,8 @@ import logging
 import shlex
 import time
 
+import litellm
+
 # Configure comprehensive error filtering
 class ComprehensiveErrorFilter(logging.Filter):
     """Filter to suppress various expected errors and warnings."""
@@ -354,6 +356,46 @@ START_TIME = time.time()
 set_tracing_disabled(True)
 
 
+def _get_active_model_name(agent) -> str:
+    """Return the best available model name for error handling."""
+    agent_model = getattr(agent, "model", None)
+    model_name = getattr(agent_model, "model", None)
+    return str(model_name or os.getenv("CAI_MODEL", ""))
+
+
+def _handle_litellm_ollama_error(error: Exception, console: Console, agent) -> bool:
+    """Print concise Ollama/LiteLLM connection errors without exiting the REPL."""
+    error_text = str(error)
+    model_name = _get_active_model_name(agent)
+    lower_error = error_text.lower()
+    lower_model = model_name.lower()
+
+    api_connection_error = isinstance(error, litellm.exceptions.APIConnectionError)
+    ollama_connection_error = "ollama" in lower_error and (
+        "connection" in lower_error or "404 page not found" in lower_error
+    )
+
+    if not (api_connection_error or ollama_connection_error):
+        return False
+
+    logger = logging.getLogger(__name__)
+    logger.error("LiteLLM/Ollama connection error: %s", error_text, exc_info=True)
+
+    if lower_model.startswith("ollama_chat/") and "404 page not found" in lower_error:
+        console.print(
+            "[bold red]Ollama returned 404. Check OLLAMA_API_BASE. "
+            "For ollama_chat use http://localhost:11434, not http://localhost:11434/v1.[/bold red]"
+        )
+    else:
+        console.print(f"[bold red]LiteLLM/Ollama connection error: {error_text}[/bold red]")
+
+    if os.getenv("CAI_DEBUG", "1") == "2":
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+    return True
+
+
 def update_agent_models_recursively(agent, new_model, visited=None):
     """
     Recursively update the model for an agent and all agents in its handoffs.
@@ -443,6 +485,15 @@ def run_cai_cli(
     turn_count = 0
     idle_time = 0
     console = Console()
+    if os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true":
+        agent_name = getattr(agent, "name", "")
+        if agent_name != "Bug Bounter":
+            agent = get_agent_by_name("bug_bounter_agent", agent_id="P1")
+            os.environ["CAI_AGENT_TYPE"] = "bug_bounter_agent"
+            console.print(
+                "[bold cyan]Auto-pentest mode uses Bug Bounter only; "
+                "switched active agent to Bug Bounter.[/bold cyan]"
+            )
     last_model = os.getenv("CAI_MODEL", "alias1")
     last_agent_type = os.getenv("CAI_AGENT_TYPE", "one_tool_agent")
     parallel_count = int(os.getenv("CAI_PARALLEL", "1"))
@@ -480,7 +531,31 @@ def run_cai_cli(
     # Display banner
     display_banner(console)
     print("\n")
-    display_quick_guide(console)
+    if (
+        os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
+        or getattr(agent, "name", "") == "Bug Bounter"
+    ):
+        from cai.auto_pentest_ui import (
+            display_auto_pentest_tool_inventory,
+            enforce_auto_pentest_tool_minimum,
+            prompt_auto_pentest_application_context,
+            reset_auto_pentest_run_state,
+        )
+
+        if (
+            os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
+            and os.getenv("CAI_AUTO_PENTEST_RESUME", "false").lower() != "true"
+        ):
+            reset_auto_pentest_run_state(preserve_context=True)
+        display_auto_pentest_tool_inventory(console)
+        if (
+            os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
+            and not enforce_auto_pentest_tool_minimum(console)
+        ):
+            return None
+        prompt_auto_pentest_application_context(console)
+    else:
+        display_quick_guide(console)
 
     # Function to get the short name of the agent for display
     def get_agent_short_name(agent):
@@ -489,13 +564,14 @@ def run_cai_cli(
             return agent.name
         return "Agent"
 
-    # Prevent the model from using its own rich streaming to avoid conflicts
-    # but allow final output message to ensure all agent responses are shown
+    # Prevent model-side display from fighting the auto-pentest dashboard.
     if hasattr(agent, "model"):
         if hasattr(agent.model, "disable_rich_streaming"):
             agent.model.disable_rich_streaming = False  # Now True as the model handles streaming
         if hasattr(agent.model, "suppress_final_output"):
-            agent.model.suppress_final_output = False  # Changed to False to show all agent messages
+            agent.model.suppress_final_output = (
+                os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
+            )
 
         # Set the agent name in the model for proper display in streaming panel
         if hasattr(agent.model, "set_agent_name"):
@@ -648,7 +724,7 @@ def run_cai_cli(
                             )
                         if hasattr(agent.model, "suppress_final_output"):
                             agent.model.suppress_final_output = (
-                                False  # Changed to False to show all agent messages
+                                os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
                             )
 
                         # Apply current model to the new agent and all its handoff agents
@@ -1573,6 +1649,9 @@ def run_cai_cli(
                             # Log error for debugging
                             logger = logging.getLogger(__name__)
                             logger.error(f"Error occurred during streaming: {str(e)}", exc_info=True)
+
+                            if _handle_litellm_ollama_error(e, console, agent):
+                                return None
                             
                             # Only show error details in debug mode
                             if os.getenv("CAI_DEBUG", "1") == "2":
@@ -1786,6 +1865,11 @@ def run_cai_cli(
             import sys
             import traceback
 
+            if _handle_litellm_ollama_error(e, console, agent):
+                stop_active_timer()
+                start_idle_timer()
+                continue
+
             # Only show detailed errors in debug mode
             if os.getenv("CAI_DEBUG", "1") == "2":
                 exc_type, exc_value, exc_traceback = sys.exc_info()
@@ -1853,6 +1937,9 @@ def main():
 
     # Get agent type from environment variables or use default
     agent_type = os.getenv("CAI_AGENT_TYPE", "one_tool_agent")
+    if os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true":
+        agent_type = "bug_bounter_agent"
+        os.environ["CAI_AGENT_TYPE"] = agent_type
 
     # Get the agent instance by name with default ID P1
     agent = get_agent_by_name(agent_type, agent_id="P1")
@@ -1870,7 +1957,9 @@ def main():
             agent.model.disable_rich_streaming = True
         # Allow final output to ensure all agent messages are shown
         if hasattr(agent.model, "suppress_final_output"):
-            agent.model.suppress_final_output = False  # Changed to False to show all agent messages
+            agent.model.suppress_final_output = (
+                os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
+            )
 
     # Ensure the agent and all its handoff agents use the current model
     current_model = os.getenv("CAI_MODEL", "alias1")

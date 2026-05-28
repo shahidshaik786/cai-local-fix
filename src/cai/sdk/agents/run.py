@@ -4,12 +4,863 @@ import asyncio
 import copy
 import os
 import logging
+import platform
+import shutil
+import sys
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from openai.types.responses import ResponseCompletedEvent
 
 logger = logging.getLogger(__name__)
+
+_AUTO_PENTEST_TOOL_CANDIDATES = [
+    "amass",
+    "anew",
+    "aquatone",
+    "alterx",
+    "arjun",
+    "assetfinder",
+    "aws",
+    "bhedak",
+    "bypass-403",
+    "cewl",
+    "chaos",
+    "commix",
+    "corsy",
+    "crlfuzz",
+    "curl",
+    "dalfox",
+    "dig",
+    "dnsgen",
+    "dnsrecon",
+    "dnsvalidator",
+    "dnsx",
+    "docker",
+    "dirb",
+    "dirsearch",
+    "dnsenum",
+    "feroxbuster",
+    "ffuf",
+    "gau",
+    "gf",
+    "git-dumper",
+    "github-subdomains",
+    "gitleaks",
+    "gobuster",
+    "gospider",
+    "gotator",
+    "gowitness",
+    "graphql-cop",
+    "graphqlmap",
+    "grype",
+    "hakrawler",
+    "hakrevdns",
+    "helm",
+    "h2csmuggler",
+    "host",
+    "http",
+    "httprobe",
+    "httpie",
+    "httpx",
+    "interactsh-client",
+    "jaeles",
+    "jq",
+    "jwt_tool",
+    "katana",
+    "kiterunner",
+    "kubectl",
+    "kube-hunter",
+    "kxss",
+    "linkfinder",
+    "mapcidr",
+    "masscan",
+    "meg",
+    "metabigor",
+    "naabu",
+    "nikto",
+    "nmap",
+    "notify",
+    "nuclei",
+    "openssl",
+    "paramspider",
+    "playwright",
+    "prowler",
+    "puredns",
+    "python",
+    "qsreplace",
+    "retire",
+    "rush",
+    "rustscan",
+    "s3scanner",
+    "secretfinder",
+    "semgrep",
+    "shuffledns",
+    "smuggler",
+    "slowhttptest",
+    "slowloris",
+    "sqlmap",
+    "steampipe",
+    "subfinder",
+    "subjack",
+    "subzy",
+    "syft",
+    "terrascan",
+    "testssl",
+    "theHarvester",
+    "tlsx",
+    "tplmap",
+    "trufflehog",
+    "trivy",
+    "unfurl",
+    "uncover",
+    "uro",
+    "wafw00f",
+    "wapiti",
+    "waybackurls",
+    "waymore",
+    "websocat",
+    "wfuzz",
+    "whatweb",
+    "whois",
+    "wpscan",
+    "x8",
+    "xnLinkFinder",
+    "xsstrike",
+    "zgrab2",
+    "zap-baseline.py",
+    "zaproxy",
+]
+_AUTO_PENTEST_ENUMERATION_TOOLS = (
+    "curl",
+    "httpx",
+    "http",
+    "httpie",
+    "jq",
+    "python",
+    "openssl",
+    "dig",
+    "host",
+    "whois",
+    "nmap",
+    "naabu",
+    "dnsx",
+    "tlsx",
+    "subfinder",
+    "amass",
+    "assetfinder",
+    "github-subdomains",
+    "gau",
+    "waybackurls",
+    "katana",
+    "hakrawler",
+    "gospider",
+    "gobuster",
+    "ffuf",
+    "dirsearch",
+    "feroxbuster",
+    "dirb",
+    "whatweb",
+    "arjun",
+    "paramspider",
+    "linkfinder",
+    "xnLinkFinder",
+    "theHarvester",
+    "aws",
+    "kubectl",
+    "helm",
+)
+_AUTO_PENTEST_ATTACK_TOOLS = tuple(
+    tool for tool in _AUTO_PENTEST_TOOL_CANDIDATES if tool not in _AUTO_PENTEST_ENUMERATION_TOOLS
+)
+_AUTO_PENTEST_WSL_SUPPORTED_TOOLS = (
+    "curl",
+    "httpx",
+    "http",
+    "httpie",
+    "jq",
+    "python",
+    "openssl",
+    "dig",
+    "host",
+    "whois",
+    "nmap",
+    "naabu",
+    "dnsx",
+    "tlsx",
+    "subfinder",
+    "amass",
+    "assetfinder",
+    "github-subdomains",
+    "gau",
+    "waybackurls",
+    "katana",
+    "hakrawler",
+    "gospider",
+    "gobuster",
+    "ffuf",
+    "dirsearch",
+    "feroxbuster",
+    "dirb",
+    "whatweb",
+    "arjun",
+    "paramspider",
+    "linkfinder",
+    "xnLinkFinder",
+    "theHarvester",
+    "aws",
+    "kubectl",
+    "helm",
+    "anew",
+    "cewl",
+    "sqlmap",
+    "commix",
+    "wafw00f",
+    "wapiti",
+    "nikto",
+    "nuclei",
+    "dalfox",
+    "xsstrike",
+    "crlfuzz",
+    "h2csmuggler",
+    "testssl",
+    "wfuzz",
+    "slowhttptest",
+    "slowloris",
+    "masscan",
+    "rustscan",
+    "trivy",
+    "syft",
+    "grype",
+    "wpscan",
+    "git-dumper",
+    "uro",
+    "waymore",
+    "retire",
+    "semgrep",
+    "gitleaks",
+    "jaeles",
+    "trufflehog",
+    "zgrab2",
+    "chaos",
+    "alterx",
+    "puredns",
+    "shuffledns",
+    "interactsh-client",
+    "asnmap",
+    "mapcidr",
+    "uncover",
+    "notify",
+    "subjack",
+    "subzy",
+    "gotator",
+    "httprobe",
+    "meg",
+    "qsreplace",
+    "unfurl",
+    "gf",
+)
+_AUTO_PENTEST_WINDOWS_SUPPORTED_TOOLS = (
+    "curl",
+    "httpx",
+    "http",
+    "httpie",
+    "jq",
+    "python",
+    "openssl",
+    "nmap",
+    "subfinder",
+    "httpx",
+    "katana",
+    "nuclei",
+    "naabu",
+    "dnsx",
+    "tlsx",
+    "gau",
+    "waybackurls",
+    "gobuster",
+    "ffuf",
+    "sqlmap",
+    "arjun",
+    "wafw00f",
+    "dirsearch",
+)
+_AUTO_PENTEST_TOOL_ALIASES = {
+    "aws": ("aws", "aws2"),
+    "h2csmuggler": ("h2csmuggler", "h2csmuggler.py"),
+    "http": ("http", "httpie"),
+    "httpie": ("httpie", "http"),
+    "jwt_tool": ("jwt_tool", "jwt_tool.py", "jwt-tool", "jwt_tool_cli.py"),
+    "linkfinder": ("linkfinder", "LinkFinder", "LinkFinder.py", "linkfinder.py"),
+    "kxss": ("kxss", "kxss.py"),
+    "paramspider": ("paramspider", "ParamSpider", "paramspider.py"),
+    "graphql-cop": ("graphql-cop", "graphql-cop.py", "ppfuzz"),
+    "secretfinder": ("secretfinder", "SecretFinder", "SecretFinder.py"),
+    "testssl": ("testssl", "testssl.sh"),
+    "theHarvester": ("theHarvester", "theharvester", "theHarvester.py"),
+    "tplmap": ("tplmap", "tplmap.py"),
+    "wapiti": ("wapiti", "wapiti3"),
+    "xnLinkFinder": ("xnLinkFinder", "xnlinkfinder"),
+    "zap-baseline.py": ("zap-baseline.py", "zap-baseline"),
+    "zaproxy": ("zaproxy", "zap.sh"),
+}
+
+
+def _auto_pentest_system_prompt_budget() -> int:
+    try:
+        return max(1, int(os.getenv("CAI_AUTO_PENTEST_SAFE_CHECK_BUDGET", "200")))
+    except ValueError:
+        return 200
+
+
+def auto_pentest_min_required_tools() -> int:
+    required = os.getenv("CAI_AUTO_PENTEST_MIN_TOOLS", "").strip()
+    if not required:
+        return len(_AUTO_PENTEST_ENUMERATION_TOOLS)
+    try:
+        return max(0, int(required))
+    except ValueError:
+        return len(_AUTO_PENTEST_ENUMERATION_TOOLS)
+
+
+def _auto_pentest_required_startup_tools() -> tuple[str, ...]:
+    mode = os.getenv("CAI_AUTO_PENTEST_REQUIRED_TOOL_MODE", "enumeration").strip().lower()
+    if mode in {"all", "all-candidates", "everything"}:
+        return _auto_pentest_supported_tools(_auto_pentest_os_label())
+    if mode in {"none", "off"}:
+        return ()
+    supported = set(_auto_pentest_supported_tools(_auto_pentest_os_label()))
+    return tuple(tool for tool in _AUTO_PENTEST_ENUMERATION_TOOLS if tool in supported)
+
+
+def _auto_pentest_supported_tools(os_label: str) -> tuple[str, ...]:
+    if os_label in {"WSL/Linux", "Linux"}:
+        return _AUTO_PENTEST_WSL_SUPPORTED_TOOLS
+    if os_label == "Windows":
+        return _AUTO_PENTEST_WINDOWS_SUPPORTED_TOOLS
+    return tuple(
+        tool
+        for tool in _AUTO_PENTEST_ENUMERATION_TOOLS
+        if tool in {"curl", "httpx", "jq", "python", "nmap", "sqlmap", "arjun"}
+    )
+
+
+def _auto_pentest_os_label() -> str:
+    system = platform.system()
+    if system == "Linux":
+        try:
+            with open("/proc/version", encoding="utf-8", errors="ignore") as version_file:
+                version = version_file.read().lower()
+            if "microsoft" in version or "wsl" in version:
+                return "WSL/Linux"
+        except OSError:
+            pass
+    return system or "unknown"
+
+
+def _auto_pentest_package_manager_candidates(os_label: str) -> list[str]:
+    if os_label == "Windows":
+        return ["winget", "choco", "scoop", "go", "pipx", "npm"]
+    if os_label == "WSL/Linux":
+        return ["apt", "apt-get", "snap", "go", "pipx", "npm", "cargo"]
+    if os_label == "Linux":
+        return ["apt", "apt-get", "dnf", "yum", "pacman", "snap", "go", "pipx", "npm", "cargo"]
+    return ["go", "pipx", "npm", "cargo"]
+
+
+def _auto_pentest_search_path() -> str:
+    paths = [os.environ.get("PATH", "")]
+    cwd = os.getcwd()
+    home = os.path.expanduser("~")
+    candidate_dirs = [
+        os.path.dirname(sys.executable),
+        os.path.join(home, "go", "bin"),
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".npm-global", "bin"),
+        os.path.join(home, ".cargo", "bin"),
+        os.path.join(home, "tools", "h2csmuggler"),
+        os.path.join(home, "tools", "jwt_tool"),
+        os.path.join(home, "tools", "LinkFinder"),
+        os.path.join(home, "tools", "SecretFinder"),
+        os.path.join(home, "tools", "tplmap"),
+        os.path.join(home, "tools", "kxss"),
+        os.path.join(home, "tools", "theHarvester"),
+        os.path.join(home, "tools", "ParamSpider"),
+        os.path.join(home, "tools", "graphql-cop"),
+    ]
+    if os.name == "nt":
+        candidate_dirs.extend(
+            [
+                os.path.join(cwd, "cai_env", "Scripts"),
+                os.path.join(cwd, ".venv", "Scripts"),
+                os.path.join(cwd, "venv", "Scripts"),
+            ]
+        )
+    else:
+        candidate_dirs.extend(
+            [
+                os.path.join(cwd, "cai_env_wsl", "bin"),
+                os.path.join(cwd, "cai_env", "bin"),
+                os.path.join(cwd, ".venv", "bin"),
+                os.path.join(cwd, "venv", "bin"),
+            ]
+        )
+    paths.extend(path for path in candidate_dirs if path and os.path.isdir(path))
+    unique_paths: list[str] = []
+    seen: set[str] = set()
+    for path_group in paths:
+        for path in path_group.split(os.pathsep):
+            normalized = os.path.normcase(os.path.abspath(path)) if path else ""
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_paths.append(path)
+    return os.pathsep.join(unique_paths)
+
+
+def _auto_pentest_notable_search_dirs(search_path: str) -> list[str]:
+    cwd = os.path.normcase(os.path.abspath(os.getcwd()))
+    home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+    notable: list[str] = []
+    for path in search_path.split(os.pathsep):
+        if not path:
+            continue
+        absolute = os.path.abspath(path)
+        normalized = os.path.normcase(absolute)
+        if normalized.startswith(cwd) or normalized == os.path.normcase(
+            os.path.abspath(os.path.dirname(sys.executable))
+        ) or normalized.startswith(os.path.join(home, "go")) or normalized.startswith(
+            os.path.join(home, ".local")
+        ) or normalized.startswith(os.path.join(home, ".npm-global")) or normalized.startswith(
+            os.path.join(home, ".cargo")
+        ) or normalized.startswith(os.path.join(home, "tools")):
+            notable.append(absolute)
+    return notable
+
+
+def _auto_pentest_find_tool(tool_name: str, search_path: str) -> str | None:
+    aliases = _AUTO_PENTEST_TOOL_ALIASES.get(tool_name, (tool_name,))
+    for alias in aliases:
+        direct = shutil.which(alias, path=search_path)
+        if direct:
+            return direct
+        for path in search_path.split(os.pathsep):
+            if not path:
+                continue
+            candidate = os.path.join(path, alias)
+            if os.path.isfile(candidate):
+                return candidate
+        if os.name == "nt":
+            for suffix in (".exe", ".bat", ".cmd", ".ps1", ".py"):
+                direct = shutil.which(f"{alias}{suffix}", path=search_path)
+                if direct:
+                    return direct
+                for path in search_path.split(os.pathsep):
+                    if not path:
+                        continue
+                    candidate = os.path.join(path, f"{alias}{suffix}")
+                    if os.path.isfile(candidate):
+                        return candidate
+        elif not alias.endswith(".py"):
+            direct = shutil.which(f"{alias}.py", path=search_path)
+            if direct:
+                return direct
+            for path in search_path.split(os.pathsep):
+                if not path:
+                    continue
+                candidate = os.path.join(path, f"{alias}.py")
+                if os.path.isfile(candidate):
+                    return candidate
+    return None
+
+
+def get_auto_pentest_tool_inventory_data() -> dict[str, Any]:
+    os_label = _auto_pentest_os_label()
+    search_path = _auto_pentest_search_path()
+    available = []
+    missing = []
+    available_by_name: dict[str, str] = {}
+    for tool_name in _AUTO_PENTEST_TOOL_CANDIDATES:
+        path = _auto_pentest_find_tool(tool_name, search_path)
+        if path:
+            available.append({"name": tool_name, "path": path})
+            available_by_name[tool_name] = path
+        else:
+            missing.append(tool_name)
+
+    candidates = _auto_pentest_package_manager_candidates(os_label)
+    available_package_managers = [
+        name for name in candidates if _auto_pentest_find_tool(name, search_path)
+    ]
+    missing_package_managers = [
+        name for name in candidates if not _auto_pentest_find_tool(name, search_path)
+    ]
+    supported_tools = _auto_pentest_supported_tools(os_label)
+    supported_set = set(supported_tools)
+    unsupported_tools = [
+        name for name in _AUTO_PENTEST_TOOL_CANDIDATES if name not in supported_set
+    ]
+    startup_required_tools = _auto_pentest_required_startup_tools()
+    missing_startup_required_tools = [
+        name for name in startup_required_tools if name not in available_by_name
+    ]
+    enumeration_available = [
+        {"name": name, "path": available_by_name[name]}
+        for name in _AUTO_PENTEST_ENUMERATION_TOOLS
+        if name in available_by_name and name in supported_set
+    ]
+    enumeration_missing = [
+        name
+        for name in _AUTO_PENTEST_ENUMERATION_TOOLS
+        if name in supported_set and name not in available_by_name
+    ]
+    attack_available = [
+        {"name": name, "path": available_by_name[name]}
+        for name in _AUTO_PENTEST_ATTACK_TOOLS
+        if name in available_by_name and name in supported_set
+    ]
+    attack_missing = [
+        name
+        for name in _AUTO_PENTEST_ATTACK_TOOLS
+        if name in supported_set and name not in available_by_name
+    ]
+    minimum_required = len(startup_required_tools)
+    return {
+        "os": os_label,
+        "tool_count": len(_AUTO_PENTEST_TOOL_CANDIDATES),
+        "supported_tool_count": len(supported_tools),
+        "unsupported_tools": unsupported_tools,
+        "enumeration_tool_count": len(
+            [tool for tool in _AUTO_PENTEST_ENUMERATION_TOOLS if tool in supported_set]
+        ),
+        "attack_tool_count": len(
+            [tool for tool in _AUTO_PENTEST_ATTACK_TOOLS if tool in supported_set]
+        ),
+        "available_tools": available,
+        "missing_tools": missing,
+        "minimum_required": minimum_required,
+        "required_tool_mode": os.getenv("CAI_AUTO_PENTEST_REQUIRED_TOOL_MODE", "enumeration"),
+        "required_tools": list(startup_required_tools),
+        "missing_required_tools": missing_startup_required_tools,
+        "minimum_ready": not missing_startup_required_tools,
+        "enumeration_tools": enumeration_available,
+        "missing_enumeration_tools": enumeration_missing,
+        "attack_tools": attack_available,
+        "missing_attack_tools": attack_missing,
+        "available_package_managers": available_package_managers,
+        "missing_package_managers": missing_package_managers,
+        "search_paths": search_path.split(os.pathsep),
+        "notable_search_dirs": _auto_pentest_notable_search_dirs(search_path),
+        "search_path_extra": [
+            path
+            for path in search_path.split(os.pathsep)
+            if path and path not in os.environ.get("PATH", "").split(os.pathsep)
+        ],
+        "install_hint": _auto_pentest_install_plan_hint(os_label),
+        "install_commands": auto_pentest_install_commands(os_label),
+    }
+
+
+def _auto_pentest_package_manager_inventory(os_label: str) -> str:
+    candidates = _auto_pentest_package_manager_candidates(os_label)
+    search_path = _auto_pentest_search_path()
+    available = [name for name in candidates if _auto_pentest_find_tool(name, search_path)]
+    missing = [name for name in candidates if not _auto_pentest_find_tool(name, search_path)]
+    return (
+        f"package managers available: {', '.join(available) if available else 'none'}; "
+        f"package managers missing: {', '.join(missing) if missing else 'none'}"
+    )
+
+
+def _auto_pentest_install_plan_hint(os_label: str) -> str:
+    if os_label == "Windows":
+        return (
+            "On native Windows, prefer installing a smaller native toolkit with winget, "
+            "Chocolatey, Scoop, Go, or Python/pipx after user approval. For the full "
+            "toolkit, recommend WSL Ubuntu."
+        )
+    if os_label in {"WSL/Linux", "Linux"}:
+        return (
+            "On Ubuntu/WSL, CAI installs in stages: first the Web/API/cloud "
+            "enumeration toolkit, then the attack and validation toolkit. The "
+            "auto-pentest startup gate requires enumeration readiness by default; "
+            "attack tools are installed and used after discovery data exists."
+        )
+    return "Install missing tools only after user approval using the platform package manager."
+
+
+def _auto_pentest_clone_command(repo_url: str, directory_name: str) -> str:
+    return (
+        "mkdir -p ~/tools && cd ~/tools && "
+        f"if [ ! -d {directory_name}/.git ]; then "
+        f"GIT_TERMINAL_PROMPT=0 git clone --depth 1 {repo_url} {directory_name}; "
+        "fi"
+    )
+
+
+def _auto_pentest_requirements_command(directory_name: str) -> str:
+    return (
+        f"test ! -f ~/tools/{directory_name}/requirements.txt || "
+        f"python3 -m pip install --user -r ~/tools/{directory_name}/requirements.txt"
+    )
+
+
+def auto_pentest_install_commands(os_label: str | None = None) -> list[str]:
+    os_label = os_label or _auto_pentest_os_label()
+    if os_label in {"WSL/Linux", "Linux"}:
+        return [
+            "sudo apt update",
+            "sudo apt install -y nmap masscan dirb nikto jq curl git unzip make gcc golang-go pipx npm dnsutils whois whatweb wafw00f wapiti slowhttptest testssl.sh dnsrecon dnsenum libcurl4-openssl-dev python3-dev libssl-dev pkg-config httpie cewl wfuzz ruby ruby-dev awscli websocat cargo",
+            "if command -v snap >/dev/null 2>&1; then sudo snap install feroxbuster || true; sudo snap install rustscan || true; sudo snap install trivy || true; sudo snap install syft --classic || true; sudo snap install grype --classic || true; sudo snap install helm --classic || true; fi",
+            "sudo gem install wpscan || true",
+            "pipx ensurepath",
+            "pipx install sqlmap",
+            "pipx install arjun",
+            "pipx install wafw00f",
+            "pipx install dirsearch",
+            "pipx install xsstrike",
+            "pipx install commix",
+            "pipx install wapiti3",
+            "pipx install git-dumper",
+            "pipx install uro",
+            "pipx install waymore",
+            "pipx install slowloris",
+            "pipx install xnLinkFinder",
+            "pipx install playwright",
+            "pipx install semgrep",
+            "mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global && npm install -g retire",
+            _auto_pentest_clone_command("https://github.com/BishopFox/h2csmuggler.git", "h2csmuggler"),
+            _auto_pentest_clone_command("https://github.com/GerbenJavado/LinkFinder.git", "LinkFinder"),
+            _auto_pentest_clone_command("https://github.com/devanshbatham/ParamSpider.git", "ParamSpider"),
+            _auto_pentest_clone_command("https://github.com/laramies/theHarvester.git", "theHarvester"),
+            "chmod +x ~/tools/h2csmuggler/*.py ~/tools/LinkFinder/*.py ~/tools/theHarvester/*.py ~/tools/ParamSpider/*.py 2>/dev/null || true",
+            _auto_pentest_requirements_command("LinkFinder"),
+            _auto_pentest_requirements_command("ParamSpider"),
+            _auto_pentest_requirements_command("theHarvester"),
+            "go install github.com/OJ/gobuster/v3@latest",
+            "go install github.com/ffuf/ffuf/v2@latest",
+            "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+            "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+            "go install github.com/projectdiscovery/katana/cmd/katana@latest",
+            "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+            "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest",
+            "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
+            "go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest",
+            "go install github.com/projectdiscovery/notify/cmd/notify@latest",
+            "go install github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest",
+            "go install github.com/projectdiscovery/uncover/cmd/uncover@latest",
+            "go install github.com/lc/gau/v2/cmd/gau@latest",
+            "go install github.com/tomnomnom/waybackurls@latest",
+            "go install github.com/hahwul/dalfox/v2@latest",
+            "go install github.com/tomnomnom/assetfinder@latest",
+            "go install github.com/tomnomnom/anew@latest",
+            "go install github.com/tomnomnom/unfurl@latest",
+            "go install github.com/tomnomnom/gf@latest",
+            "go install github.com/tomnomnom/httprobe@latest",
+            "go install github.com/tomnomnom/meg@latest",
+            "go install github.com/tomnomnom/qsreplace@latest",
+            "go install github.com/jaeles-project/gospider@latest",
+            "go install github.com/hakluke/hakrawler@latest",
+            "go install github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest",
+            "go install github.com/jaeles-project/jaeles@latest",
+            "go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest",
+            "go install github.com/d3mondev/puredns/v2@latest",
+            "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
+            "go install github.com/projectdiscovery/asnmap/cmd/asnmap@latest",
+            "go install github.com/projectdiscovery/alterx/cmd/alterx@latest",
+            "go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest",
+            "go install github.com/owasp-amass/amass/v4/...@master",
+            "go install github.com/gwen001/github-subdomains@latest",
+            "go install github.com/hahwul/dalfox/v2@latest",
+            "go install github.com/gitleaks/gitleaks/v8@latest",
+            "go install github.com/trufflesecurity/trufflehog/v3@latest",
+            "go install github.com/zmap/zgrab2@latest",
+            "go install github.com/haccer/subjack@latest",
+            "go install github.com/LukaSikic/subzy@latest",
+            "go install github.com/Josue87/gotator@latest",
+            'export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin"',
+        ]
+    if os_label == "Windows":
+        return [
+            "winget install -e --id GoLang.Go",
+            "winget install -e --id Python.Python.3.12",
+            "python -m pip install --user pipx",
+            "python -m pipx ensurepath",
+            "pipx install sqlmap",
+            "pipx install arjun",
+            "pipx install wafw00f",
+            "pipx install dirsearch",
+            "go install github.com/OJ/gobuster/v3@latest",
+            "go install github.com/ffuf/ffuf/v2@latest",
+            "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+            "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+        ]
+    return []
+
+
+def _auto_pentest_tool_inventory() -> str:
+    inventory = get_auto_pentest_tool_inventory_data()
+    available = [
+        f"{item['name']}={item['path']}" for item in inventory["available_tools"]
+    ]
+    missing = inventory["missing_tools"]
+
+    return (
+        f" Tool inventory for this {inventory['os']} environment: available tools: "
+        f"{', '.join(available) if available else 'none'}; missing tools: "
+        f"{', '.join(missing) if missing else 'none'}. "
+        f"Enumeration toolkit readiness: {len(inventory['enumeration_tools'])}/"
+        f"{inventory['enumeration_tool_count']} installed; missing enumeration tools: "
+        f"{', '.join(inventory['missing_enumeration_tools']) if inventory['missing_enumeration_tools'] else 'none'}. "
+        f"Attack toolkit readiness: {len(inventory['attack_tools'])}/"
+        f"{inventory['attack_tool_count']} installed; missing attack tools: "
+        f"{', '.join(inventory['missing_attack_tools']) if inventory['missing_attack_tools'] else 'none'}. "
+        f"{_auto_pentest_package_manager_inventory(inventory['os'])}. "
+        f"Startup requirement mode: {inventory['required_tool_mode']}; required tools "
+        f"before auto-pentest starts: {inventory['minimum_required']}. "
+        f"{inventory['install_hint']} Use the most specific installed tool first: "
+        "httpx for header/probe sweeps, gobuster/ffuf/dirsearch for bounded content "
+        "discovery when installed, sqlmap only for discovered in-scope parameters "
+        "with non-destructive low-intensity options, and curl for direct proof/evidence "
+        "requests. "
+        "If a missing tool is required for the next step, ask the user to install it "
+        "instead of pretending it is available."
+    )
+
+
+def _apply_auto_pentest_system_prompt(system_prompt: str | None) -> str | None:
+    if os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() != "true":
+        return system_prompt
+    if os.getenv("CAI_AGENT_TYPE", "") != "bug_bounter_agent":
+        return system_prompt
+    if system_prompt and "CAI_AUTO_PENTEST_MODE is enabled." in system_prompt:
+        return system_prompt
+
+    budget = _auto_pentest_system_prompt_budget()
+    tool_inventory = _auto_pentest_tool_inventory()
+    relaxed_instruction = ""
+    if os.getenv("CAI_AUTO_PENTEST_RELAXED", "false").lower() == "true":
+        relaxed_instruction = (
+            " CAI_AUTO_PENTEST_RELAXED is enabled for this non-production target: "
+            "auto-approve in-scope app-layer actions such as state-changing "
+            "test-account requests, while still blocking out-of-scope and host-destructive "
+            "commands."
+        )
+    parallel_count = int(os.getenv("CAI_PARALLEL", "1") or "1")
+    try:
+        auto_parallelism = max(1, int(os.getenv("CAI_AUTO_PENTEST_PARALLELISM", "1")))
+    except ValueError:
+        auto_parallelism = 1
+    parallel_instruction = ""
+    if parallel_count >= 3:
+        parallel_instruction = (
+            f" CAI_PARALLEL={parallel_count} is enabled: divide coverage by role. "
+            "If your agent name ends with #1, focus on discovery and configuration. "
+            "If it ends with #2, focus on API authentication and authorization. "
+            "If it ends with #3, focus on client-side, business logic, and validation "
+            "checks. Avoid duplicating another agent's obvious next check."
+        )
+    if auto_parallelism > 1:
+        parallel_instruction += (
+            f" CAI_AUTO_PENTEST_PARALLELISM={auto_parallelism} is enabled at the "
+            "tool execution layer: independent in-scope checks may run concurrently, but "
+            "dependent, brute force, DoS/load, aggressive fuzzing, and destructive "
+            "tests must remain serialized or guarded."
+        )
+    auto_prompt = (
+        "\n\nCAI_AUTO_PENTEST_MODE is enabled. The authorized scope is only "
+        "http://localhost:8888 and http://127.0.0.1:8888. Continue the authorized "
+        "pentest workflow by using registered tools for in-scope HTTP/API "
+        f"checks until at least {budget} checklist items have actual tool results, then summarize. "
+        "This budget represents an expanded top-200 web/API vulnerability checklist "
+        "based on Interview_Prep: address items "
+        "one by one by executing applicable in-scope checks across vulnerability "
+        "categories. A category such as SQL injection is not itself 200 test cases: "
+        "run a bounded set of detection subchecks for discovered parameters, record "
+        "the evidence, then move to XSS, auth, IDOR/BOLA, upload, SSRF, headers, "
+        "CORS, methods, disclosure, workflow, and API-specific categories. "
+        "Do not loop on the same endpoint, parameter, or vulnerability class. "
+        "If a command returns a quoting/format error, correct it once; if it still "
+        "fails, move to the next vulnerability category. Do not mark checklist items "
+        "not applicable, guarded, skipped, or complete in assistant prose; only the "
+        "runner can classify an executed tool request. "
+        "Use the built-in structured Web/API test-case registry instead of random "
+        "payload selection. Registry categories include recon and endpoint discovery, "
+        "security headers, HTTP methods, CORS, cookies and session attributes, "
+        "authentication, authorization/IDOR/BOLA, input validation, bounded SQL injection "
+        "signals, non-executing XSS reflection checks, SSRF parameter discovery, file upload "
+        "validation, error/debug exposure, sensitive data exposure, low-count rate "
+        "limit signals, business logic checks, and OWASP API Top 10 coverage. "
+        f"{tool_inventory} "
+        "Do not blindly send vulnerability payloads first. Complete and report an "
+        "enumeration baseline before vulnerability payload testing. CAI persists "
+        "enumeration artifacts from completed tool results to "
+        "logs/auto_pentest/enumeration.sqlite and mirrors them in "
+        "logs/auto_pentest/report.md; later attack checks must be selected from "
+        "those discovered URLs, routes, APIs, parameters, auth surfaces, object IDs, "
+        "and workflows instead of guessed targets. Follow this exact "
+        "order: 1) fetch the application entry HTML and response headers, 2) extract "
+        "real script/link/manifest URLs from that HTML, 3) fetch discovered static "
+        "assets only, 4) extract real routes, APIs, forms, JavaScript endpoints, and "
+        "object IDs from those assets and responses, "
+        "4) identify registration/login/logout/profile/workflow functionality, "
+        "5) create and login with a harmless test account when registration exists, "
+        "6) understand normal app behavior with that account, then 7) query or rely "
+        "on the stored enumeration dataset and run targeted vulnerability checks "
+        "based on discovered functionality. "
+        "Print a concise enumeration summary in normal assistant text after this baseline: "
+        "discovered assets, routes/APIs, forms/auth flows, parameters, and items not found. "
+        "Do not guess paths such as /static/app.js or /static/api.json unless the HTML or "
+        "a discovered asset references them. "
+        "First verify required local tools are available, such as curl and PowerShell; "
+        "do not install anything unless a required tool is missing and the user approves. "
+        "Scoped URL discovery tools such as gobuster, ffuf, dirsearch, and crawling commands "
+        "may be used with small wordlists, low threads, and reasonable limits against the "
+        "authorized localhost target only. "
+        "If a registration endpoint exists, create a unique harmless test account using "
+        "an email like cai-test-<timestamp>@example.com and a non-secret test password, "
+        "then login with the same credentials, save cookies to a local cookie jar, and "
+        "use that authenticated session for auth, authorization, CSRF, and cookie "
+        "attribute checks. Cookie jar inspection is allowed when it uses the test session. "
+        "For this non-production target, validate password policy with a small set of "
+        "registration attempts using weak, boundary, and acceptable test passwords. "
+        "Validate rate limiting with very low-count request bursts only, enough to observe "
+        "whether throttling exists, not enough to load test. In-scope state-changing API "
+        "requests such as PUT, PATCH, and DELETE may be tested when they use disposable "
+        "test data or the created test account; the runner asks once per session before "
+        "non-destructive in-scope tests and still guards destructive state-changing "
+        "requests. "
+        "Emit exactly one registered tool call JSON per assistant turn. For HTTP checks "
+        "use generic_linux_command with a command argument, not pseudo-tools named curl "
+        "or httpx. Do not invent pseudo-tools such as extract_real_js_asset_urls or "
+        "check_robots_sitemap_security_metadata; use generic_linux_command for those "
+        "checks. Select the best installed tool for each step: use httpx for structured "
+        "header/status probing, gobuster/ffuf/dirsearch for bounded directory/content "
+        "enumeration if installed, sqlmap only after real parameters are discovered "
+        "with --batch and low-intensity non-destructive options, and curl for direct "
+        "request/response evidence. Cover, without repeating "
+        "successful checks unnecessarily: security headers, cookie attributes, CORS, "
+        "OPTIONS/methods, robots.txt, sitemap.xml, security.txt, well-known metadata, "
+        "manifest/static assets, JavaScript route extraction, API discovery, Swagger/"
+        "OpenAPI, GraphQL discovery, harmless reflected proof strings, non-destructive "
+        "SQLi bounded detection probes, REST parameter pollution, path traversal only on discovered file "
+        "parameters, source maps, backup/source disclosure names with reasonable limits, "
+        "cache headers, cache deception, host header behavior with in-scope hosts, "
+        "CSRF signals on discovered state-changing forms, JWT inspection only when "
+        "tokens are discovered, auth/authz only with provided or discovered test "
+        "accounts/IDs, IDOR/BOLA only when object IDs exist, mass assignment only on "
+        "discovered JSON APIs, upload validation only on discovered upload endpoints, "
+        "very low-count rate-limit signals, and business logic checks only on discovered "
+        "workflows. Do not use browser-executing XSS payloads, real user credentials, "
+        "credential stuffing, brute force, load tests, deletion, writes outside intended app "
+        "requests, or out-of-scope URLs. Do not stop after basic header checks. Do not "
+        "call CTF flag-discriminator or handoff-style tools unless you have an actual "
+        "non-empty flag candidate. If a tool is needed, emit the "
+        f"registered tool call JSON and continue from the tool result.{relaxed_instruction}"
+        f"{parallel_instruction}"
+    )
+    return f"{system_prompt or ''}{auto_prompt}"
+
 
 from ._run_impl import (
     AgentToolUseTracker,
@@ -731,7 +1582,9 @@ class Runner:
         streamed_result.current_agent = agent
         streamed_result._current_agent_output_schema = output_schema
 
-        system_prompt = await agent.get_system_prompt(context_wrapper)
+        system_prompt = _apply_auto_pentest_system_prompt(
+            await agent.get_system_prompt(context_wrapper)
+        )
 
         handoffs = cls._get_handoffs(agent)
         model = cls._get_model(agent, run_config)
@@ -837,7 +1690,9 @@ class Runner:
                 ),
             )
 
-        system_prompt = await agent.get_system_prompt(context_wrapper)
+        system_prompt = _apply_auto_pentest_system_prompt(
+            await agent.get_system_prompt(context_wrapper)
+        )
 
         output_schema = cls._get_output_schema(agent)
         handoffs = cls._get_handoffs(agent)
@@ -1044,7 +1899,7 @@ class Runner:
                 model_settings.agent_model = run_config.model
 
         new_response = await model.get_response(
-            system_instructions=system_prompt,
+            system_instructions=_apply_auto_pentest_system_prompt(system_prompt),
             input=input,
             model_settings=model_settings,
             tools=all_tools,

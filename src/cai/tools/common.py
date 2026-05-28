@@ -6,7 +6,6 @@ inside or outside of virtual containers.
 import subprocess  # nosec B404
 import threading
 import os
-import pty
 import signal
 import time
 import uuid
@@ -15,6 +14,11 @@ import shlex
 import select
 from wasabi import color  # pylint: disable=import-error
 from cai.util import format_time, start_active_timer, stop_active_timer, start_idle_timer, stop_idle_timer, cli_print_tool_output
+
+IS_WINDOWS = os.name == "nt" or sys.platform == "win32"
+
+if not IS_WINDOWS:
+    import pty
 
 
 # Instead of direct import
@@ -198,22 +202,33 @@ class ShellSession:  # pylint: disable=too-many-instance-attributes
         # --- Start in Container ---
         if self.container_id:
             try:
-                self.master, self.slave = pty.openpty()
                 docker_cmd_list = [
-                    "docker", "exec", "-i", "-t",  # allocate a TTY inside the container
+                    "docker", "exec", "-i",
                     "-w", self.workspace_dir,
                     self.container_id,
                     "sh", "-c",
                     self.command,
                 ]
-                self.process = subprocess.Popen(
-                    docker_cmd_list,
-                    stdin=self.slave,
-                    stdout=self.slave,
-                    stderr=self.slave,
-                    preexec_fn=os.setsid,
-                    universal_newlines=True,
-                )
+                if IS_WINDOWS:
+                    self.process = subprocess.Popen(
+                        docker_cmd_list,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                else:
+                    self.master, self.slave = pty.openpty()
+                    docker_cmd_list.insert(3, "-t")  # allocate a TTY inside the container
+                    self.process = subprocess.Popen(
+                        docker_cmd_list,
+                        stdin=self.slave,
+                        stdout=self.slave,
+                        stderr=self.slave,
+                        preexec_fn=os.setsid,
+                        universal_newlines=True,
+                    )
                 self.is_running = True
                 self.output_buffer.append(
                     f"[Session {self.session_id}] Started in container {self.container_id[:12]}: "
@@ -246,17 +261,29 @@ class ShellSession:  # pylint: disable=too-many-instance-attributes
 
         # --- Start Locally (Host) ---
         try:
-            self.master, self.slave = pty.openpty()
-            self.process = subprocess.Popen(  # pylint: disable=subprocess-popen-preexec-fn
-                self.command,
-                shell=True,  # nosec B602
-                stdin=self.slave,
-                stdout=self.slave,
-                stderr=self.slave,
-                cwd=self.workspace_dir,
-                preexec_fn=os.setsid,
-                universal_newlines=True,
-            )
+            if IS_WINDOWS:
+                self.process = subprocess.Popen(  # nosec B602
+                    self.command,
+                    shell=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    cwd=self.workspace_dir,
+                    text=True,
+                    bufsize=1,
+                )
+            else:
+                self.master, self.slave = pty.openpty()
+                self.process = subprocess.Popen(  # pylint: disable=subprocess-popen-preexec-fn
+                    self.command,
+                    shell=True,  # nosec B602
+                    stdin=self.slave,
+                    stdout=self.slave,
+                    stderr=self.slave,
+                    cwd=self.workspace_dir,
+                    preexec_fn=os.setsid,
+                    universal_newlines=True,
+                )
             self.is_running = True
             self.output_buffer.append(f"[Session {self.session_id}] Started: {self.command}")
             # Start a thread to read output
@@ -267,6 +294,9 @@ class ShellSession:  # pylint: disable=too-many-instance-attributes
             return str(e)
     def _read_output(self):
         """Read output with non-blocking select"""
+        if IS_WINDOWS:
+            return self._read_pipe_output()
+
         try:
             while self.is_running and self.master is not None:
                 try:
@@ -318,6 +348,27 @@ class ShellSession:  # pylint: disable=too-many-instance-attributes
             self.is_running = False
             return str(e)
     
+    def _read_pipe_output(self):
+        """Read output from a subprocess pipe on Windows."""
+        try:
+            while self.is_running and self.process and self.process.stdout:
+                output = self.process.stdout.readline()
+                if output:
+                    self.output_buffer.append(output.rstrip("\n"))
+                    self.last_activity = time.time()
+                    continue
+
+                if self.process.poll() is not None:
+                    self.is_running = False
+                    break
+
+                time.sleep(0.05)
+        except Exception as e:
+            self.output_buffer.append(f"Error in read_output loop: {str(e)}")
+            self.is_running = False
+            return str(e)
+        return None
+
 
     def is_process_running(self):
         """Check if the process is still running"""
@@ -352,8 +403,12 @@ class ShellSession:  # pylint: disable=too-many-instance-attributes
                      self.output_buffer.append(f"[Session {self.session_id}] Warning: Partial input write.")
                 self.last_activity = time.time()
                 return "Input sent to session"
-            else:
-                return "Session PTY not available for input"
+            if IS_WINDOWS and self.process and self.process.stdin:
+                self.process.stdin.write(input_data.rstrip() + "\n")
+                self.process.stdin.flush()
+                self.last_activity = time.time()
+                return "Input sent to session"
+            return "Session PTY not available for input"
         except Exception as e:  # pylint: disable=broad-except
             self.output_buffer.append(f"Error sending input: {str(e)}")
             return f"Error sending input: {str(e)}"
@@ -397,8 +452,11 @@ class ShellSession:  # pylint: disable=too-many-instance-attributes
             if self.process:
                 # Try to terminate the process group
                 try:
-                    pgid = os.getpgid(self.process.pid)
-                    os.killpg(pgid, signal.SIGTERM) 
+                    if IS_WINDOWS:
+                        self.process.terminate()
+                    else:
+                        pgid = os.getpgid(self.process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
                 except ProcessLookupError:
                      pass # Process already gone
                 except subprocess.TimeoutExpired:

@@ -2504,6 +2504,13 @@ def cli_print_tool_output(
     """
     import time
 
+    if (
+        os.getenv("CAI_AUTO_PENTEST_MODE", "false").lower() == "true"
+        and tool_name == "generic_linux_command"
+        and os.getenv("CAI_AUTO_PENTEST_SUPPRESS_TOOL_PANELS", "true").lower() == "true"
+    ):
+        return
+
     # If it's an empty output, don't print anything except for streaming sessions
     if not output and not call_id and not streaming:
         return
